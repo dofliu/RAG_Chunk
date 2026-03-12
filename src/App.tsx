@@ -145,7 +145,7 @@ export default function App() {
         if (!queryEmbedding) continue;
 
         // Search chunks
-        const retrievedChunks = searchChunks(queryEmbedding, embeddings[model], 3);
+        const retrievedChunks = searchChunks(queryEmbedding, embeddings[model], 10);
 
         // Generate answer
         const context = retrievedChunks.map((c, i) => `[Chunk ${i + 1}]:\n${c.text}`).join('\n\n---\n\n');
@@ -342,7 +342,7 @@ export default function App() {
                     </div>
 
                     <div className="space-y-4">
-                      <h3 className="text-sm font-medium text-zinc-500 uppercase tracking-wider">Retrieved Context (Top 3)</h3>
+                      <h3 className="text-sm font-medium text-zinc-500 uppercase tracking-wider">Retrieved Context (Top 10)</h3>
                       <div className="space-y-3">
                         {results[model].retrievedChunks.map((chunk, i) => (
                           <div key={i} className="bg-white p-4 rounded-xl border border-zinc-200 shadow-sm">
