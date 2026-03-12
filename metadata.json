@@ -1,0 +1,5 @@
+{
+  "name": "Embedding Compare",
+  "description": "Compare Gemini embedding models (gemini-embedding-2-preview vs gemini-embedding-001) by uploading documents and performing RAG.",
+  "requestFramePermissions": []
+}
