@@ -16,7 +16,7 @@ const AVAILABLE_MODELS = [
 
 interface ModelResult {
   retrievedChunks: ChunkWithScore[];
-  answer: string;
+  answers: Record<number, string>; // kValue -> answer
 }
 
 export default function App() {
@@ -24,7 +24,8 @@ export default function App() {
   const [documentText, setDocumentText] = useState('');
   const [chunkSize, setChunkSize] = useState(1000);
   const [overlap, setOverlap] = useState(200);
-  const [selectedModels, setSelectedModels] = useState<string[]>(['gemini-embedding-2-preview', 'gemini-embedding-001']);
+  const [selectedKValues, setSelectedKValues] = useState<number[]>([3, 5]);
+  const [selectedModels, setSelectedModels] = useState<string[]>(['gemini-embedding-2-preview']);
   
   const [isProcessing, setIsProcessing] = useState(false);
   const [processStatus, setProcessStatus] = useState('');
@@ -144,21 +145,27 @@ export default function App() {
         const queryEmbedding = queryResult.embeddings?.[0]?.values;
         if (!queryEmbedding) continue;
 
-        // Search chunks
+        // Search chunks (always get 10 for display)
         const retrievedChunks = searchChunks(queryEmbedding, embeddings[model], 10);
+        const modelAnswers: Record<number, string> = {};
 
-        // Generate answer
-        const context = retrievedChunks.map((c, i) => `[Chunk ${i + 1}]:\n${c.text}`).join('\n\n---\n\n');
-        const prompt = `You are a helpful assistant. Answer the user's question based ONLY on the provided context. If the answer is not in the context, say "I cannot answer this based on the provided document."\n\nWhen providing your answer, you MUST cite the source chunks you used by referencing their numbers like [Chunk 1] or [Chunk 2, 3].\n\nContext:\n${context}\n\nQuestion: ${query}`;
-        
-        const answerResult = await ai.models.generateContent({
-          model: 'gemini-3-flash-preview',
-          contents: prompt,
-        });
+        // Generate answers for each selected K value
+        for (const k of selectedKValues) {
+          const chunksForLLM = retrievedChunks.slice(0, k);
+          const context = chunksForLLM.map((c, i) => `[Chunk ${i + 1}]:\n${c.text}`).join('\n\n---\n\n');
+          const prompt = `You are a helpful assistant. Answer the user's question based ONLY on the provided context. If the answer is not in the context, say "I cannot answer this based on the provided document."\n\nWhen providing your answer, you MUST cite the source chunks you used by referencing their numbers like [Chunk 1] or [Chunk 2, 3].\n\nContext:\n${context}\n\nQuestion: ${query}`;
+          
+          const answerResult = await ai.models.generateContent({
+            model: 'gemini-3-flash-preview',
+            contents: prompt,
+          });
+          
+          modelAnswers[k] = answerResult.text || 'No answer generated.';
+        }
 
         newResults[model] = {
           retrievedChunks,
-          answer: answerResult.text || 'No answer generated.'
+          answers: modelAnswers
         };
       }
 
@@ -217,26 +224,56 @@ export default function App() {
 
         <div className="space-y-4">
           <h2 className="text-sm font-medium flex items-center gap-2">
-            <Settings className="w-4 h-4" /> Chunking Strategy
+            <Settings className="w-4 h-4" /> RAG Strategy
           </h2>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs text-zinc-500 mb-1">Chunk Size</label>
-              <input
-                type="number"
-                value={chunkSize}
-                onChange={(e) => setChunkSize(Number(e.target.value))}
-                className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-              />
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs text-zinc-500 mb-1">Chunk Size</label>
+                <input
+                  type="number"
+                  value={chunkSize}
+                  onChange={(e) => setChunkSize(Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-zinc-500 mb-1">Overlap</label>
+                <input
+                  type="number"
+                  value={overlap}
+                  onChange={(e) => setOverlap(Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                />
+              </div>
             </div>
             <div>
-              <label className="block text-xs text-zinc-500 mb-1">Overlap</label>
-              <input
-                type="number"
-                value={overlap}
-                onChange={(e) => setOverlap(Number(e.target.value))}
-                className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-              />
+              <label className="block text-xs text-zinc-500 mb-2">Compare K Values (Context Size)</label>
+              <div className="flex gap-2">
+                {[3, 5, 7, 10].map((v) => (
+                  <button
+                    key={v}
+                    onClick={() => {
+                      if (selectedKValues.includes(v)) {
+                        if (selectedKValues.length > 1) {
+                          setSelectedKValues(selectedKValues.filter(k => k !== v));
+                        }
+                      } else {
+                        setSelectedKValues([...selectedKValues, v].sort((a, b) => a - b));
+                      }
+                    }}
+                    className={cn(
+                      "flex-1 py-1.5 text-xs font-medium rounded-md border transition-all",
+                      selectedKValues.includes(v)
+                        ? "bg-indigo-600 border-indigo-600 text-white shadow-sm"
+                        : "bg-white border-zinc-200 text-zinc-600 hover:border-zinc-300"
+                    )}
+                  >
+                    {v}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[10px] text-zinc-400 mt-1.5">Select multiple to compare how context size affects answers.</p>
             </div>
           </div>
         </div>
@@ -323,38 +360,66 @@ export default function App() {
         </div>
 
         <div className="flex-1 overflow-y-auto p-6">
-          <div className="max-w-7xl mx-auto">
+          <div className="max-w-full mx-auto">
             {Object.keys(results).length > 0 ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+              <div className="space-y-12">
                 {selectedModels.map(model => results[model] && (
-                  <div key={model} className="space-y-6">
-                    <div className="flex items-center justify-between border-b border-zinc-200 pb-4">
-                      <h2 className="text-xl font-semibold text-zinc-900">{model}</h2>
+                  <div key={model} className="space-y-8">
+                    <div className="flex items-center justify-between border-b-2 border-zinc-900 pb-4">
+                      <h2 className="text-2xl font-bold text-zinc-900">{model}</h2>
                     </div>
 
-                    <div className="space-y-4">
-                      <h3 className="text-sm font-medium text-zinc-500 uppercase tracking-wider">Generated Answer</h3>
-                      <div className="bg-white p-6 rounded-2xl border border-zinc-200 shadow-sm min-h-[150px]">
-                        <div className="text-zinc-700 leading-relaxed prose prose-sm max-w-none prose-zinc">
-                          <Markdown>{results[model].answer}</Markdown>
+                    {/* Answers Comparison Grid */}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                      {selectedKValues.map(k => (
+                        <div key={k} className="space-y-4">
+                          <div className="flex items-center gap-2">
+                            <span className="px-3 py-1 bg-indigo-600 text-white text-xs font-bold rounded-full">K = {k}</span>
+                            <h3 className="text-sm font-medium text-zinc-500 uppercase tracking-wider">Generated Answer</h3>
+                          </div>
+                          <div className="bg-white p-6 rounded-2xl border-2 border-indigo-100 shadow-sm min-h-[200px]">
+                            <div className="text-zinc-700 leading-relaxed prose prose-sm max-w-none prose-zinc">
+                              <Markdown>{results[model].answers[k]}</Markdown>
+                            </div>
+                          </div>
                         </div>
-                      </div>
+                      ))}
                     </div>
 
+                    {/* Retrieved Chunks */}
                     <div className="space-y-4">
                       <h3 className="text-sm font-medium text-zinc-500 uppercase tracking-wider">Retrieved Context (Top 10)</h3>
-                      <div className="space-y-3">
-                        {results[model].retrievedChunks.map((chunk, i) => (
-                          <div key={i} className="bg-white p-4 rounded-xl border border-zinc-200 shadow-sm">
-                            <div className="flex items-center justify-between mb-2">
-                              <span className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Chunk {i + 1}</span>
-                              <span className="text-xs font-mono text-indigo-600 bg-indigo-50 px-2 py-1 rounded-md">
-                                Score: {chunk.score.toFixed(4)}
-                              </span>
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
+                        {results[model].retrievedChunks.map((chunk, i) => {
+                          const maxK = Math.max(...selectedKValues);
+                          const isInAnyK = selectedKValues.some(k => i < k);
+                          const kStatus = selectedKValues.filter(k => i < k);
+                          
+                          return (
+                            <div 
+                              key={i} 
+                              className={cn(
+                                "bg-white p-3 rounded-xl border shadow-sm transition-all text-xs",
+                                isInAnyK ? "border-indigo-200 ring-1 ring-indigo-500/5" : "border-zinc-200 opacity-40"
+                              )}
+                            >
+                              <div className="flex flex-col gap-1.5 mb-2">
+                                <div className="flex items-center justify-between">
+                                  <span className="font-bold text-zinc-400"># {i + 1}</span>
+                                  <span className="font-mono text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">
+                                    {chunk.score.toFixed(3)}
+                                  </span>
+                                </div>
+                                <div className="flex flex-wrap gap-1">
+                                  {kStatus.map(k => (
+                                    <span key={k} className="text-[9px] font-bold text-white bg-indigo-500 px-1 rounded">K{k}</span>
+                                  ))}
+                                </div>
+                              </div>
+                              <p className="text-zinc-600 line-clamp-6 leading-tight">{chunk.text}</p>
                             </div>
-                            <p className="text-sm text-zinc-600 line-clamp-4">{chunk.text}</p>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   </div>
