@@ -24,6 +24,7 @@ export interface ExperimentConfig {
 export interface EvaluationScores {
   faithfulness: number;
   relevance: number;
+  correctness: number;
   latencyMs: number;
 }
 
