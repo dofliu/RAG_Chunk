@@ -9,8 +9,16 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 export async function parseDocument(file: File): Promise<string> {
   const extension = file.name.split('.').pop()?.toLowerCase();
 
-  if (extension === 'txt') {
+  if (extension === 'txt' || extension === 'md') {
     return await file.text();
+  } else if (extension === 'json') {
+    const text = await file.text();
+    try {
+      const obj = JSON.parse(text);
+      return JSON.stringify(obj, null, 2);
+    } catch (e) {
+      return text;
+    }
   } else if (extension === 'pdf') {
     const arrayBuffer = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
