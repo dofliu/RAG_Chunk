@@ -1142,31 +1142,52 @@ export default function App() {
                 "p-6 rounded-2xl border shadow-sm space-y-4",
                 darkMode ? "bg-zinc-900 border-zinc-800" : "bg-white border-zinc-200"
               )}>
-                <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-500">Test Questions</h3>
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-500">Test Questions</h3>
+                  <span className={cn("text-[10px]", darkMode ? "text-zinc-500" : "text-zinc-400")}>
+                    Fill in expected answers for more accurate scoring
+                  </span>
+                </div>
                 {arQuestions.map((q, idx) => (
-                  <div key={idx} className="flex gap-2">
+                  <div key={idx} className="space-y-1">
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={q.question}
+                        onChange={(e) => {
+                          const updated = [...arQuestions];
+                          updated[idx] = { ...q, question: e.target.value };
+                          setArQuestions(updated);
+                        }}
+                        placeholder={`Question ${idx + 1}...`}
+                        className={cn(
+                          "flex-1 px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500",
+                          darkMode ? "bg-zinc-800 border-zinc-700 text-zinc-100" : "bg-zinc-50 border-zinc-200 text-zinc-900"
+                        )}
+                      />
+                      {arQuestions.length > 1 && (
+                        <button
+                          onClick={() => setArQuestions(arQuestions.filter((_, i) => i !== idx))}
+                          className="px-2 text-zinc-400 hover:text-red-500"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
                     <input
                       type="text"
-                      value={q.question}
+                      value={q.expectedAnswer || ''}
                       onChange={(e) => {
                         const updated = [...arQuestions];
-                        updated[idx] = { ...q, question: e.target.value };
+                        updated[idx] = { ...q, expectedAnswer: e.target.value };
                         setArQuestions(updated);
                       }}
-                      placeholder={`Question ${idx + 1}...`}
+                      placeholder="Expected answer (optional, improves scoring accuracy)"
                       className={cn(
-                        "flex-1 px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500",
-                        darkMode ? "bg-zinc-800 border-zinc-700 text-zinc-100" : "bg-zinc-50 border-zinc-200 text-zinc-900"
+                        "w-full px-3 py-1.5 border rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500",
+                        darkMode ? "bg-zinc-800/50 border-zinc-700 text-zinc-300" : "bg-amber-50/50 border-zinc-200 text-zinc-600"
                       )}
                     />
-                    {arQuestions.length > 1 && (
-                      <button
-                        onClick={() => setArQuestions(arQuestions.filter((_, i) => i !== idx))}
-                        className="px-2 text-zinc-400 hover:text-red-500"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    )}
                   </div>
                 ))}
                 <button
@@ -1445,7 +1466,7 @@ export default function App() {
                       ))}
                     </div>
                     <div className="flex items-center gap-4 mt-4">
-                      <div className="flex gap-3">
+                      <div className="flex gap-3 flex-wrap">
                         <span className="text-xs font-bold px-2 py-1 rounded bg-emerald-100 text-emerald-700 border border-emerald-200">
                           Score: {arReport.bestConfig.compositeScore.toFixed(2)}
                         </span>
@@ -1455,6 +1476,11 @@ export default function App() {
                         <span className="text-xs font-bold px-2 py-1 rounded bg-purple-100 text-purple-700 border border-purple-200">
                           Rel: {arReport.bestConfig.scores.relevance.toFixed(1)}
                         </span>
+                        {arReport.bestConfig.scores.correctness > 0 && (
+                          <span className="text-xs font-bold px-2 py-1 rounded bg-amber-100 text-amber-700 border border-amber-200">
+                            Corr: {arReport.bestConfig.scores.correctness.toFixed(1)}
+                          </span>
+                        )}
                       </div>
                       <button
                         onClick={handleApplyBestConfig}
@@ -1489,6 +1515,7 @@ export default function App() {
                             <th className="text-left py-2 px-2 font-bold text-zinc-500">LLM</th>
                             <th className="text-left py-2 px-2 font-bold text-zinc-500">Faith</th>
                             <th className="text-left py-2 px-2 font-bold text-zinc-500">Rel</th>
+                            <th className="text-left py-2 px-2 font-bold text-zinc-500">Corr</th>
                             <th className="text-left py-2 px-2 font-bold text-zinc-500">Latency</th>
                           </tr>
                         </thead>
@@ -1518,6 +1545,7 @@ export default function App() {
                               <td className="py-2 px-2 truncate max-w-[120px]">{r.config.llmModel}</td>
                               <td className="py-2 px-2">{r.scores.faithfulness.toFixed(1)}</td>
                               <td className="py-2 px-2">{r.scores.relevance.toFixed(1)}</td>
+                              <td className="py-2 px-2">{r.scores.correctness > 0 ? r.scores.correctness.toFixed(1) : '-'}</td>
                               <td className="py-2 px-2">{(r.scores.latencyMs / 1000).toFixed(1)}s</td>
                             </tr>
                           )).flatMap((row, idx) => {
@@ -1525,7 +1553,7 @@ export default function App() {
                             if (arExpandedRow !== idx) return [row];
                             return [row, (
                               <tr key={`${idx}-answer`} className={cn(darkMode ? "bg-zinc-800/30" : "bg-zinc-50")}>
-                                <td colSpan={11} className="px-4 py-3">
+                                <td colSpan={12} className="px-4 py-3">
                                   <div className="space-y-2">
                                     <p className="text-[10px] text-zinc-500 uppercase font-bold">Answer Preview</p>
                                     <div className={cn(

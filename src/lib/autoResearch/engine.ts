@@ -165,8 +165,10 @@ export async function runAutoResearch(opts: RunAutoResearchOptions): Promise<Aut
       // Run each test question and average the scores
       let totalFaithfulness = 0;
       let totalRelevance = 0;
+      let totalCorrectness = 0;
       let totalLatency = 0;
       let lastAnswer = '';
+      const hasAnyExpectedAnswer = testQuestions.some(q => q.expectedAnswer?.trim());
 
       for (const tq of testQuestions) {
         if (abortSignal?.aborted) break;
@@ -188,7 +190,6 @@ export async function runAutoResearch(opts: RunAutoResearchOptions): Promise<Aut
         });
 
         const genStart = Date.now();
-        // Determine the API key for LLM generation - use gemini key for gemini models
         const llmApiKey = apiKeys['gemini'] || '';
         const genAi = new GoogleGenAI({ apiKey: llmApiKey });
         const answerResult = await genAi.models.generateContent({
@@ -205,19 +206,33 @@ export async function runAutoResearch(opts: RunAutoResearchOptions): Promise<Aut
           message: `[${i + 1}/${total}] Evaluating answer quality...`,
         });
 
+        // Build evaluation prompt — include correctness check if expectedAnswer is provided
+        const hasGT = !!tq.expectedAnswer?.trim();
+        const evalMetrics = [
+          '1. Faithfulness (0-10): Is the answer grounded ONLY in the context?',
+          '2. Relevance (0-10): Does the answer directly address the query?',
+        ];
+        const evalFields = '"faithfulness": number, "relevance": number';
+        let correctnessMetric = '';
+        let correctnessField = '';
+        if (hasGT) {
+          correctnessMetric = `\n3. Correctness (0-10): How semantically close is the answer to the expected answer? 10 = covers all key points, 0 = completely wrong.`;
+          correctnessField = ', "correctness": number';
+        }
+
         const evalPrompt = `Evaluate the following RAG answer.
 Metrics:
-1. Faithfulness (0-10): Is the answer grounded ONLY in the context?
-2. Relevance (0-10): Does the answer directly address the query?
+${evalMetrics.join('\n')}${correctnessMetric}
 
-Return ONLY a JSON object: { "faithfulness": number, "relevance": number }
+Return ONLY a JSON object: { ${evalFields}${correctnessField} }
 
 Query: ${tq.question}
 Context: ${context.substring(0, 2000)}
-Answer: ${answerText}`;
+Answer: ${answerText}${hasGT ? `\nExpected Answer: ${tq.expectedAnswer}` : ''}`;
 
         let faithfulness = 5;
         let relevance = 5;
+        let correctness = hasGT ? 5 : 0;
         try {
           const evalResult = await genAi.models.generateContent({
             model: 'gemini-3-flash-preview',
@@ -227,12 +242,16 @@ Answer: ${answerText}`;
           const evalData = JSON.parse(evalResult.text || '{}');
           faithfulness = evalData.faithfulness ?? 5;
           relevance = evalData.relevance ?? 5;
+          if (hasGT) {
+            correctness = evalData.correctness ?? 5;
+          }
         } catch {
           // Keep defaults
         }
 
         totalFaithfulness += faithfulness;
         totalRelevance += relevance;
+        totalCorrectness += correctness;
         totalLatency += latencyMs;
       }
 
@@ -240,20 +259,21 @@ Answer: ${answerText}`;
       const scores = {
         faithfulness: totalFaithfulness / numQ,
         relevance: totalRelevance / numQ,
+        correctness: totalCorrectness / numQ,
         latencyMs: totalLatency / numQ,
       };
 
       results.push({
         config,
         scores,
-        compositeScore: computeCompositeScore(scores),
+        compositeScore: computeCompositeScore(scores, hasAnyExpectedAnswer),
         answer: lastAnswer,
       });
     } catch (error: any) {
       // Record failed experiment with zero scores
       results.push({
         config,
-        scores: { faithfulness: 0, relevance: 0, latencyMs: 0 },
+        scores: { faithfulness: 0, relevance: 0, correctness: 0, latencyMs: 0 },
         compositeScore: 0,
         answer: `Error: ${error.message}`,
       });
