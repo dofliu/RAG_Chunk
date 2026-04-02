@@ -1,5 +1,5 @@
-import { useState, ChangeEvent, useEffect } from 'react';
-import { Upload, FileText, Settings, Search, Loader2, Trash2, Moon, Sun, Database, MessageSquare } from 'lucide-react';
+import { useState, ChangeEvent, useEffect, useRef } from 'react';
+import { Upload, FileText, Settings, Search, Loader2, Trash2, Moon, Sun, Database, MessageSquare, Key, FlaskConical, Trophy, Play, Square, ChevronDown, ChevronUp } from 'lucide-react';
 import { parseDocument } from './lib/documentParser';
 import { chunkText, searchChunks, ChunkWithScore, cosineSimilarity } from './lib/rag';
 import { GoogleGenAI } from '@google/genai';
@@ -8,18 +8,17 @@ import Markdown from 'react-markdown';
 import { get, set, clear, keys, del } from 'idb-keyval';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
-
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
-const AVAILABLE_MODELS = [
-  'gemini-embedding-2-preview',
-  'gemini-embedding-001'
-];
+import { getAllProviders, getAllModels, embedWithModel, loadApiKeys, saveApiKeys } from './lib/providers/registry';
+import { runAutoResearch } from './lib/autoResearch/engine';
+import type { AutoResearchProgress, AutoResearchReport, TestQuestion, SearchSpace } from './lib/autoResearch/types';
 
 const AVAILABLE_LLM_MODELS = [
   'gemini-3-flash-preview',
   'gemini-3.1-pro-preview'
 ];
+
+const ALL_EMBEDDING_MODELS = getAllModels();
+const ALL_PROVIDERS = getAllProviders();
 
 interface ModelResult {
   retrievedChunks: ChunkWithScore[];
@@ -38,7 +37,6 @@ export default function App() {
   const [chunkSize, setChunkSize] = useState(1000);
   const [overlap, setOverlap] = useState(200);
   const [chunkingStrategy, setChunkingStrategy] = useState<'fixed' | 'paragraph' | 'semantic'>('fixed');
-  const [kValue, setKValue] = useState(3); 
   const [selectedKValues, setSelectedKValues] = useState<number[]>([3, 5]);
   const [selectedModels, setSelectedModels] = useState<string[]>(['gemini-embedding-2-preview']);
   const [selectedLLMModels, setSelectedLLMModels] = useState<string[]>(['gemini-3-flash-preview']);
@@ -46,24 +44,53 @@ export default function App() {
   const [threshold, setThreshold] = useState(0.3);
   const [useReRanking, setUseReRanking] = useState(false);
   const [useEvaluation, setUseEvaluation] = useState(false);
-  
+
   const [isProcessing, setIsProcessing] = useState(false);
   const [processStatus, setProcessStatus] = useState('');
   const [embeddings, setEmbeddings] = useState<Record<string, {text: string, embedding: number[]}[]>>({});
   const [cachedFiles, setCachedFiles] = useState<string[]>([]);
   const [darkMode, setDarkMode] = useState(false);
-  
+
   const [query, setQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
   const [results, setResults] = useState<Record<string, ModelResult>>({});
   const [errorMsg, setErrorMsg] = useState('');
 
+  // API Key management
+  const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
+  const [showApiKeys, setShowApiKeys] = useState(false);
+
+  // Active main tab: 'search' or 'autoresearch'
+  const [activeTab, setActiveTab] = useState<'search' | 'autoresearch'>('search');
+
+  // AutoResearch state
+  const [arQuestions, setArQuestions] = useState<TestQuestion[]>([{ question: '' }]);
+  const [arSearchSpace, setArSearchSpace] = useState<SearchSpace>({
+    embeddingModels: ['gemini-embedding-2-preview'],
+    chunkSizes: [500, 1000],
+    overlaps: [0, 200],
+    chunkingStrategies: ['fixed', 'paragraph'],
+    kValues: [3, 5],
+    llmModels: ['gemini-3-flash-preview'],
+  });
+  const [arMaxExperiments, setArMaxExperiments] = useState(50);
+  const [arProgress, setArProgress] = useState<AutoResearchProgress | null>(null);
+  const [arReport, setArReport] = useState<AutoResearchReport | null>(null);
+  const [arRunning, setArRunning] = useState(false);
+  const arAbortRef = useRef<AbortController | null>(null);
+
   useEffect(() => {
     refreshCachedFiles();
-    // Check system dark mode
     if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
       setDarkMode(true);
     }
+    // Load API keys from localStorage, seeding Gemini from env if not already set
+    const stored = loadApiKeys();
+    if (!stored.gemini && process.env.GEMINI_API_KEY) {
+      stored.gemini = process.env.GEMINI_API_KEY;
+    }
+    setApiKeys(stored);
+    saveApiKeys(stored);
   }, []);
 
   const refreshCachedFiles = async () => {
@@ -94,9 +121,9 @@ export default function App() {
     try {
       const cacheKey = `embeddings_${file.name}_${file.size}_${chunkSize}_${overlap}`;
       const cachedEmbeddings: Record<string, {text: string, embedding: number[]}[]> = await get(cacheKey) || {};
-      
+
       const modelsToProcess = selectedModels.filter(m => !cachedEmbeddings[m]);
-      
+
       if (modelsToProcess.length === 0) {
         setEmbeddings(cachedEmbeddings);
         setProcessStatus('Loaded from cache!');
@@ -113,33 +140,25 @@ export default function App() {
 
       setProcessStatus('Chunking text...');
       let chunks: string[] = [];
-      
+
       if (chunkingStrategy === 'paragraph') {
         chunks = text.split(/\n\s*\n/).filter(p => p.trim().length > 0);
       } else if (chunkingStrategy === 'semantic') {
         setProcessStatus('Semantic chunking (embedding sentences)...');
-        // Split into sentences (basic regex)
         const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
         if (sentences.length <= 1) {
           chunks = [text];
         } else {
-          // Embed sentences in batches to avoid rate limits
           const sentenceEmbeddings: number[][] = [];
           const batchSize = 20;
           for (let i = 0; i < sentences.length; i += batchSize) {
             const batch = sentences.slice(i, i + batchSize);
-            const result = await ai.models.embedContent({
-              model: 'models/text-embedding-004',
-              contents: batch,
-            });
-            sentenceEmbeddings.push(...result.embeddings.map(e => e.values));
+            const vecs = await embedWithModel(batch, 'gemini-embedding-001', apiKeys);
+            sentenceEmbeddings.push(...vecs);
           }
-
-          // Merge sentences based on similarity
           let currentChunk = sentences[0];
           for (let i = 0; i < sentenceEmbeddings.length - 1; i++) {
             const sim = cosineSimilarity(sentenceEmbeddings[i], sentenceEmbeddings[i+1]);
-            // If similarity is high, merge. Threshold 0.7 is arbitrary.
             if (sim > 0.7 && currentChunk.length < chunkSize) {
               currentChunk += " " + sentences[i+1];
             } else {
@@ -150,10 +169,9 @@ export default function App() {
           chunks.push(currentChunk);
         }
       } else {
-        // Fixed size
         chunks = chunkText(text, chunkSize, overlap);
       }
-      
+
       if (chunks.length === 0) {
         throw new Error('No text chunks generated.');
       }
@@ -163,24 +181,13 @@ export default function App() {
       for (const model of modelsToProcess) {
         setProcessStatus(`Generating embeddings with ${model}...`);
         const modelEmbeddings: {text: string, embedding: number[]}[] = [];
-        
-        // Batch processing to avoid payload limits
         const batchSize = 10;
         for (let i = 0; i < chunks.length; i += batchSize) {
           const batch = chunks.slice(i, i + batchSize);
-          const result = await ai.models.embedContent({
-            model: model,
-            contents: batch,
+          const vecs = await embedWithModel(batch, model, apiKeys);
+          vecs.forEach((vec, idx) => {
+            modelEmbeddings.push({ text: batch[idx], embedding: vec });
           });
-          
-          if (result.embeddings) {
-            result.embeddings.forEach((emb: any, idx: number) => {
-              modelEmbeddings.push({
-                text: batch[idx],
-                embedding: emb.values
-              });
-            });
-          }
         }
         newEmbeddings[model] = modelEmbeddings;
       }
@@ -213,13 +220,9 @@ export default function App() {
       for (const model of selectedModels) {
         if (!embeddings[model]) continue;
 
-        // Embed query
-        const queryResult = await ai.models.embedContent({
-          model: model,
-          contents: query,
-        });
-        
-        const queryEmbedding = queryResult.embeddings?.[0]?.values;
+        // Embed query using provider registry
+        const qVecs = await embedWithModel([query], model, apiKeys);
+        const queryEmbedding = qVecs[0];
         if (!queryEmbedding) continue;
 
         // Search chunks (always get 10 for display)
@@ -238,7 +241,8 @@ export default function App() {
           ${allRetrievedChunks.map((c, i) => `[${i}]: ${c.text.substring(0, 300)}...`).join('\n')}`;
           
           try {
-            const reRankResult = await ai.models.generateContent({
+            const genAi = new GoogleGenAI({ apiKey: apiKeys.gemini || '' });
+            const reRankResult = await genAi.models.generateContent({
               model: 'gemini-3-flash-preview',
               contents: reRankPrompt,
               config: { responseMimeType: 'application/json' }
@@ -283,7 +287,8 @@ export default function App() {
               { role: 'user', parts: [{ text: currentPrompt }] }
             ];
 
-            const answerResult = await ai.models.generateContent({
+            const genAi = new GoogleGenAI({ apiKey: apiKeys.gemini || '' });
+            const answerResult = await genAi.models.generateContent({
               model: llmModel,
               contents: newHistory,
             });
@@ -305,7 +310,8 @@ export default function App() {
               Answer: ${answerText}`;
               
               try {
-                const evalResult = await ai.models.generateContent({
+                const evalAi = new GoogleGenAI({ apiKey: apiKeys.gemini || '' });
+                const evalResult = await evalAi.models.generateContent({
                   model: 'gemini-3-flash-preview',
                   contents: evalPrompt,
                   config: { responseMimeType: 'application/json' }
@@ -428,6 +434,74 @@ export default function App() {
     } finally {
       setIsSearching(false);
     }
+  };
+
+  // --- API Key helpers ---
+  const handleApiKeyChange = (providerName: string, value: string) => {
+    const updated = { ...apiKeys, [providerName]: value };
+    setApiKeys(updated);
+    saveApiKeys(updated);
+  };
+
+  // --- AutoResearch handlers ---
+  const handleStartAutoResearch = async () => {
+    if (!documentText && !file) {
+      setErrorMsg('Please upload and process a document first.');
+      return;
+    }
+    const validQuestions = arQuestions.filter(q => q.question.trim());
+    if (validQuestions.length === 0) {
+      setErrorMsg('Please add at least one test question.');
+      return;
+    }
+
+    setArRunning(true);
+    setArReport(null);
+    setErrorMsg('');
+    const abortController = new AbortController();
+    arAbortRef.current = abortController;
+
+    try {
+      let text = documentText;
+      if (!text && file) {
+        text = await parseDocument(file);
+        setDocumentText(text);
+      }
+
+      const report = await runAutoResearch({
+        documentText: text,
+        testQuestions: validQuestions,
+        searchSpace: arSearchSpace,
+        apiKeys,
+        maxExperiments: arMaxExperiments,
+        onProgress: setArProgress,
+        abortSignal: abortController.signal,
+      });
+      setArReport(report);
+    } catch (error: any) {
+      if (error.name !== 'AbortError') {
+        setErrorMsg(`AutoResearch error: ${error.message}`);
+      }
+    } finally {
+      setArRunning(false);
+      arAbortRef.current = null;
+    }
+  };
+
+  const handleStopAutoResearch = () => {
+    arAbortRef.current?.abort();
+  };
+
+  const handleApplyBestConfig = () => {
+    if (!arReport?.bestConfig) return;
+    const best = arReport.bestConfig.config;
+    setChunkSize(best.chunkSize);
+    setOverlap(best.overlap);
+    setChunkingStrategy(best.chunkingStrategy);
+    setSelectedModels([best.embeddingModel]);
+    setSelectedLLMModels([best.llmModel]);
+    setSelectedKValues([best.kValue]);
+    setActiveTab('search');
   };
 
   return (
@@ -604,32 +678,70 @@ export default function App() {
           </div>
         </div>
 
+        {/* API Keys */}
+        <div className="space-y-3">
+          <button
+            onClick={() => setShowApiKeys(!showApiKeys)}
+            className="w-full text-sm font-medium flex items-center gap-2 justify-between"
+          >
+            <span className="flex items-center gap-2"><Key className="w-4 h-4" /> API Keys</span>
+            {showApiKeys ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+          </button>
+          {showApiKeys && (
+            <div className="space-y-2">
+              {ALL_PROVIDERS.map(provider => (
+                <div key={provider.name} className="space-y-1">
+                  <label className="block text-[10px] text-zinc-500 uppercase font-bold">{provider.label}</label>
+                  <input
+                    type="password"
+                    value={apiKeys[provider.name] || ''}
+                    onChange={(e) => handleApiKeyChange(provider.name, e.target.value)}
+                    placeholder={`${provider.label} API Key`}
+                    className={cn(
+                      "w-full px-3 py-2 border rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500",
+                      darkMode ? "bg-zinc-800 border-zinc-700 text-zinc-100" : "bg-zinc-50 border-zinc-200 text-zinc-900"
+                    )}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Embedding Models - grouped by provider */}
         <div className="space-y-3">
           <h2 className="text-sm font-medium flex items-center gap-2">
             <Database className="w-4 h-4" /> Embedding Models
           </h2>
           <div className="space-y-2">
-            {AVAILABLE_MODELS.map(model => (
-              <label key={model} className={cn(
-                "flex items-center gap-3 p-3 border rounded-lg cursor-pointer transition-colors",
-                darkMode ? "border-zinc-800 hover:bg-zinc-800" : "border-zinc-200 hover:bg-zinc-50"
-              )}>
-                <input
-                  type="checkbox"
-                  checked={selectedModels.includes(model)}
-                  onChange={(e) => {
-                    if (e.target.checked) {
-                      setSelectedModels([...selectedModels, model]);
-                    } else {
-                      if (selectedModels.length > 1) {
-                        setSelectedModels(selectedModels.filter(m => m !== model));
-                      }
-                    }
-                  }}
-                  className="w-4 h-4 text-indigo-600 rounded border-zinc-300 focus:ring-indigo-500"
-                />
-                <span className="text-xs font-medium">{model}</span>
-              </label>
+            {ALL_PROVIDERS.map(provider => (
+              <div key={provider.name} className="space-y-1">
+                <p className={cn("text-[10px] uppercase font-bold tracking-widest", darkMode ? "text-zinc-500" : "text-zinc-400")}>{provider.label}</p>
+                {provider.models.map(model => (
+                  <label key={model} className={cn(
+                    "flex items-center gap-3 p-2.5 border rounded-lg cursor-pointer transition-colors",
+                    darkMode ? "border-zinc-800 hover:bg-zinc-800" : "border-zinc-200 hover:bg-zinc-50",
+                    !apiKeys[provider.name] && "opacity-40 cursor-not-allowed"
+                  )}>
+                    <input
+                      type="checkbox"
+                      disabled={!apiKeys[provider.name]}
+                      checked={selectedModels.includes(model)}
+                      onChange={(e) => {
+                        if (e.target.checked) {
+                          setSelectedModels([...selectedModels, model]);
+                        } else {
+                          if (selectedModels.length > 1) {
+                            setSelectedModels(selectedModels.filter(m => m !== model));
+                          }
+                        }
+                      }}
+                      className="w-4 h-4 text-indigo-600 rounded border-zinc-300 focus:ring-indigo-500"
+                    />
+                    <span className="text-xs font-medium">{model}</span>
+                  </label>
+                ))}
+              </div>
             ))}
           </div>
         </div>
@@ -732,6 +844,40 @@ export default function App() {
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col h-screen overflow-hidden">
+        {/* Tab Bar */}
+        <div className={cn(
+          "flex items-center gap-0 border-b transition-colors duration-300",
+          darkMode ? "bg-zinc-900 border-zinc-800" : "bg-white border-zinc-200"
+        )}>
+          <button
+            onClick={() => setActiveTab('search')}
+            className={cn(
+              "flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors",
+              activeTab === 'search'
+                ? "border-indigo-600 text-indigo-600"
+                : cn("border-transparent", darkMode ? "text-zinc-400 hover:text-zinc-200" : "text-zinc-500 hover:text-zinc-700")
+            )}
+          >
+            <Search className="w-4 h-4" /> Search
+          </button>
+          <button
+            onClick={() => setActiveTab('autoresearch')}
+            className={cn(
+              "flex items-center gap-2 px-6 py-3 text-sm font-medium border-b-2 transition-colors",
+              activeTab === 'autoresearch'
+                ? "border-amber-500 text-amber-500"
+                : cn("border-transparent", darkMode ? "text-zinc-400 hover:text-zinc-200" : "text-zinc-500 hover:text-zinc-700")
+            )}
+          >
+            <FlaskConical className="w-4 h-4" /> AutoResearch
+          </button>
+          {errorMsg && (
+            <p className="ml-auto mr-4 text-xs text-red-500 font-medium truncate max-w-md">{errorMsg}</p>
+          )}
+        </div>
+
+        {activeTab === 'search' && (
+        <>
         <div className={cn(
           "p-6 border-b transition-colors duration-300",
           darkMode ? "bg-zinc-900 border-zinc-800" : "bg-white border-zinc-200"
@@ -970,6 +1116,419 @@ export default function App() {
             )}
           </div>
         </div>
+        </>
+        )}
+
+        {/* AutoResearch Tab */}
+        {activeTab === 'autoresearch' && (
+          <div className="flex-1 overflow-y-auto p-6">
+            <div className="max-w-4xl mx-auto space-y-6">
+              {/* Header */}
+              <div className={cn(
+                "p-6 rounded-2xl border shadow-sm",
+                darkMode ? "bg-zinc-900 border-zinc-800" : "bg-white border-zinc-200"
+              )}>
+                <h2 className="text-lg font-bold flex items-center gap-2 mb-1">
+                  <FlaskConical className="w-5 h-5 text-amber-500" /> AutoResearch
+                </h2>
+                <p className={cn("text-sm", darkMode ? "text-zinc-400" : "text-zinc-500")}>
+                  Automatically test all combinations and find the best embedding model + RAG strategy.
+                </p>
+              </div>
+
+              {/* Test Questions */}
+              <div className={cn(
+                "p-6 rounded-2xl border shadow-sm space-y-4",
+                darkMode ? "bg-zinc-900 border-zinc-800" : "bg-white border-zinc-200"
+              )}>
+                <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-500">Test Questions</h3>
+                {arQuestions.map((q, idx) => (
+                  <div key={idx} className="flex gap-2">
+                    <input
+                      type="text"
+                      value={q.question}
+                      onChange={(e) => {
+                        const updated = [...arQuestions];
+                        updated[idx] = { ...q, question: e.target.value };
+                        setArQuestions(updated);
+                      }}
+                      placeholder={`Question ${idx + 1}...`}
+                      className={cn(
+                        "flex-1 px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500",
+                        darkMode ? "bg-zinc-800 border-zinc-700 text-zinc-100" : "bg-zinc-50 border-zinc-200 text-zinc-900"
+                      )}
+                    />
+                    {arQuestions.length > 1 && (
+                      <button
+                        onClick={() => setArQuestions(arQuestions.filter((_, i) => i !== idx))}
+                        className="px-2 text-zinc-400 hover:text-red-500"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                ))}
+                <button
+                  onClick={() => setArQuestions([...arQuestions, { question: '' }])}
+                  className={cn(
+                    "text-xs font-medium px-3 py-1.5 rounded-lg border transition-colors",
+                    darkMode ? "border-zinc-700 text-zinc-400 hover:bg-zinc-800" : "border-zinc-200 text-zinc-500 hover:bg-zinc-50"
+                  )}
+                >
+                  + Add Question
+                </button>
+              </div>
+
+              {/* Search Space Config */}
+              <div className={cn(
+                "p-6 rounded-2xl border shadow-sm space-y-4",
+                darkMode ? "bg-zinc-900 border-zinc-800" : "bg-white border-zinc-200"
+              )}>
+                <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-500">Search Space</h3>
+
+                {/* Embedding models */}
+                <div>
+                  <label className="block text-[10px] text-zinc-500 uppercase font-bold mb-2">Embedding Models</label>
+                  <div className="flex flex-wrap gap-2">
+                    {ALL_EMBEDDING_MODELS.map(m => (
+                      <button
+                        key={m.modelId}
+                        disabled={!apiKeys[m.provider]}
+                        onClick={() => {
+                          const s = arSearchSpace.embeddingModels;
+                          setArSearchSpace({
+                            ...arSearchSpace,
+                            embeddingModels: s.includes(m.modelId) ? s.filter(x => x !== m.modelId) : [...s, m.modelId],
+                          });
+                        }}
+                        className={cn(
+                          "px-3 py-1.5 text-xs font-medium rounded-lg border transition-all",
+                          arSearchSpace.embeddingModels.includes(m.modelId)
+                            ? "bg-amber-500 border-amber-500 text-white"
+                            : darkMode ? "bg-zinc-800 border-zinc-700 text-zinc-400" : "bg-white border-zinc-200 text-zinc-600",
+                          !apiKeys[m.provider] && "opacity-30 cursor-not-allowed"
+                        )}
+                      >
+                        {m.modelId}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Chunk sizes */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-[10px] text-zinc-500 uppercase font-bold mb-2">Chunk Sizes</label>
+                    <div className="flex flex-wrap gap-2">
+                      {[300, 500, 800, 1000, 1500, 2000].map(v => (
+                        <button
+                          key={v}
+                          onClick={() => {
+                            const s = arSearchSpace.chunkSizes;
+                            setArSearchSpace({
+                              ...arSearchSpace,
+                              chunkSizes: s.includes(v) ? s.filter(x => x !== v) : [...s, v].sort((a, b) => a - b),
+                            });
+                          }}
+                          className={cn(
+                            "px-2.5 py-1 text-xs font-medium rounded-md border transition-all",
+                            arSearchSpace.chunkSizes.includes(v)
+                              ? "bg-amber-500 border-amber-500 text-white"
+                              : darkMode ? "bg-zinc-800 border-zinc-700 text-zinc-400" : "bg-white border-zinc-200 text-zinc-600"
+                          )}
+                        >
+                          {v}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-zinc-500 uppercase font-bold mb-2">Overlaps</label>
+                    <div className="flex flex-wrap gap-2">
+                      {[0, 50, 100, 200, 300].map(v => (
+                        <button
+                          key={v}
+                          onClick={() => {
+                            const s = arSearchSpace.overlaps;
+                            setArSearchSpace({
+                              ...arSearchSpace,
+                              overlaps: s.includes(v) ? s.filter(x => x !== v) : [...s, v].sort((a, b) => a - b),
+                            });
+                          }}
+                          className={cn(
+                            "px-2.5 py-1 text-xs font-medium rounded-md border transition-all",
+                            arSearchSpace.overlaps.includes(v)
+                              ? "bg-amber-500 border-amber-500 text-white"
+                              : darkMode ? "bg-zinc-800 border-zinc-700 text-zinc-400" : "bg-white border-zinc-200 text-zinc-600"
+                          )}
+                        >
+                          {v}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Strategies & K values */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-[10px] text-zinc-500 uppercase font-bold mb-2">Chunking Strategies</label>
+                    <div className="flex flex-wrap gap-2">
+                      {(['fixed', 'paragraph', 'semantic'] as const).map(v => (
+                        <button
+                          key={v}
+                          onClick={() => {
+                            const s = arSearchSpace.chunkingStrategies;
+                            setArSearchSpace({
+                              ...arSearchSpace,
+                              chunkingStrategies: s.includes(v) ? s.filter(x => x !== v) : [...s, v],
+                            });
+                          }}
+                          className={cn(
+                            "px-2.5 py-1 text-xs font-medium rounded-md border transition-all capitalize",
+                            arSearchSpace.chunkingStrategies.includes(v)
+                              ? "bg-amber-500 border-amber-500 text-white"
+                              : darkMode ? "bg-zinc-800 border-zinc-700 text-zinc-400" : "bg-white border-zinc-200 text-zinc-600"
+                          )}
+                        >
+                          {v}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-zinc-500 uppercase font-bold mb-2">K Values</label>
+                    <div className="flex flex-wrap gap-2">
+                      {[3, 5, 7, 10].map(v => (
+                        <button
+                          key={v}
+                          onClick={() => {
+                            const s = arSearchSpace.kValues;
+                            setArSearchSpace({
+                              ...arSearchSpace,
+                              kValues: s.includes(v) ? s.filter(x => x !== v) : [...s, v].sort((a, b) => a - b),
+                            });
+                          }}
+                          className={cn(
+                            "px-2.5 py-1 text-xs font-medium rounded-md border transition-all",
+                            arSearchSpace.kValues.includes(v)
+                              ? "bg-amber-500 border-amber-500 text-white"
+                              : darkMode ? "bg-zinc-800 border-zinc-700 text-zinc-400" : "bg-white border-zinc-200 text-zinc-600"
+                          )}
+                        >
+                          {v}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* LLM models */}
+                <div>
+                  <label className="block text-[10px] text-zinc-500 uppercase font-bold mb-2">LLM Models</label>
+                  <div className="flex flex-wrap gap-2">
+                    {AVAILABLE_LLM_MODELS.map(m => (
+                      <button
+                        key={m}
+                        onClick={() => {
+                          const s = arSearchSpace.llmModels;
+                          setArSearchSpace({
+                            ...arSearchSpace,
+                            llmModels: s.includes(m) ? s.filter(x => x !== m) : [...s, m],
+                          });
+                        }}
+                        className={cn(
+                          "px-3 py-1.5 text-xs font-medium rounded-lg border transition-all",
+                          arSearchSpace.llmModels.includes(m)
+                            ? "bg-amber-500 border-amber-500 text-white"
+                            : darkMode ? "bg-zinc-800 border-zinc-700 text-zinc-400" : "bg-white border-zinc-200 text-zinc-600"
+                        )}
+                      >
+                        {m}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Max experiments */}
+                <div className="flex items-center gap-3">
+                  <label className="text-[10px] text-zinc-500 uppercase font-bold whitespace-nowrap">Max Experiments</label>
+                  <input
+                    type="number"
+                    value={arMaxExperiments}
+                    onChange={(e) => setArMaxExperiments(Number(e.target.value))}
+                    min={1}
+                    max={500}
+                    className={cn(
+                      "w-24 px-3 py-1.5 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20",
+                      darkMode ? "bg-zinc-800 border-zinc-700 text-zinc-100" : "bg-zinc-50 border-zinc-200 text-zinc-900"
+                    )}
+                  />
+                </div>
+              </div>
+
+              {/* Run Button */}
+              <div className="flex gap-3">
+                <button
+                  onClick={handleStartAutoResearch}
+                  disabled={arRunning || !file}
+                  className="flex-1 py-3 bg-amber-500 text-white rounded-xl text-sm font-bold hover:bg-amber-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-colors"
+                >
+                  {arRunning ? (
+                    <><Loader2 className="w-4 h-4 animate-spin" /> Running...</>
+                  ) : (
+                    <><Play className="w-4 h-4" /> Start AutoResearch</>
+                  )}
+                </button>
+                {arRunning && (
+                  <button
+                    onClick={handleStopAutoResearch}
+                    className="px-6 py-3 bg-red-500 text-white rounded-xl text-sm font-bold hover:bg-red-600 flex items-center gap-2 transition-colors"
+                  >
+                    <Square className="w-4 h-4" /> Stop
+                  </button>
+                )}
+              </div>
+
+              {/* Progress */}
+              {arProgress && arProgress.phase !== 'idle' && (
+                <div className={cn(
+                  "p-4 rounded-xl border",
+                  darkMode ? "bg-zinc-900 border-zinc-800" : "bg-white border-zinc-200"
+                )}>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-bold text-zinc-500 uppercase">Progress</span>
+                    <span className="text-xs font-mono text-amber-500">{arProgress.current}/{arProgress.total}</span>
+                  </div>
+                  <div className={cn("w-full h-2 rounded-full overflow-hidden", darkMode ? "bg-zinc-800" : "bg-zinc-100")}>
+                    <div
+                      className="h-full bg-amber-500 rounded-full transition-all duration-300"
+                      style={{ width: `${(arProgress.current / arProgress.total) * 100}%` }}
+                    />
+                  </div>
+                  <p className={cn("text-xs mt-2", darkMode ? "text-zinc-400" : "text-zinc-500")}>{arProgress.message}</p>
+                </div>
+              )}
+
+              {/* Results / Rankings */}
+              {arReport && (
+                <div className="space-y-6">
+                  {/* Best Config */}
+                  <div className={cn(
+                    "p-6 rounded-2xl border-2 shadow-sm",
+                    darkMode ? "bg-zinc-900 border-amber-700" : "bg-amber-50 border-amber-300"
+                  )}>
+                    <h3 className="text-sm font-bold uppercase tracking-wider text-amber-600 flex items-center gap-2 mb-4">
+                      <Trophy className="w-4 h-4" /> Best Configuration
+                    </h3>
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                      {[
+                        ['Embedding', arReport.bestConfig.config.embeddingModel],
+                        ['LLM', arReport.bestConfig.config.llmModel],
+                        ['Strategy', arReport.bestConfig.config.chunkingStrategy],
+                        ['Chunk Size', String(arReport.bestConfig.config.chunkSize)],
+                        ['Overlap', String(arReport.bestConfig.config.overlap)],
+                        ['K', String(arReport.bestConfig.config.kValue)],
+                      ].map(([label, value]) => (
+                        <div key={label} className={cn("p-3 rounded-lg", darkMode ? "bg-zinc-800" : "bg-white")}>
+                          <p className="text-[10px] text-zinc-500 uppercase font-bold">{label}</p>
+                          <p className={cn("text-sm font-medium truncate", darkMode ? "text-zinc-100" : "text-zinc-900")}>{value}</p>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-4 mt-4">
+                      <div className="flex gap-3">
+                        <span className="text-xs font-bold px-2 py-1 rounded bg-emerald-100 text-emerald-700 border border-emerald-200">
+                          Score: {arReport.bestConfig.compositeScore.toFixed(2)}
+                        </span>
+                        <span className="text-xs font-bold px-2 py-1 rounded bg-indigo-100 text-indigo-700 border border-indigo-200">
+                          Faith: {arReport.bestConfig.scores.faithfulness.toFixed(1)}
+                        </span>
+                        <span className="text-xs font-bold px-2 py-1 rounded bg-purple-100 text-purple-700 border border-purple-200">
+                          Rel: {arReport.bestConfig.scores.relevance.toFixed(1)}
+                        </span>
+                      </div>
+                      <button
+                        onClick={handleApplyBestConfig}
+                        className="ml-auto px-4 py-2 bg-amber-500 text-white rounded-lg text-xs font-bold hover:bg-amber-600 transition-colors"
+                      >
+                        Apply to Search
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Full Rankings Table */}
+                  <div className={cn(
+                    "p-6 rounded-2xl border shadow-sm",
+                    darkMode ? "bg-zinc-900 border-zinc-800" : "bg-white border-zinc-200"
+                  )}>
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-sm font-bold uppercase tracking-wider text-zinc-500">
+                        Rankings ({arReport.totalExperiments} experiments, {(arReport.totalTimeMs / 1000).toFixed(1)}s)
+                      </h3>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className={cn("border-b", darkMode ? "border-zinc-800" : "border-zinc-200")}>
+                            <th className="text-left py-2 px-2 font-bold text-zinc-500">#</th>
+                            <th className="text-left py-2 px-2 font-bold text-zinc-500">Score</th>
+                            <th className="text-left py-2 px-2 font-bold text-zinc-500">Embedding</th>
+                            <th className="text-left py-2 px-2 font-bold text-zinc-500">Strategy</th>
+                            <th className="text-left py-2 px-2 font-bold text-zinc-500">Chunk</th>
+                            <th className="text-left py-2 px-2 font-bold text-zinc-500">Overlap</th>
+                            <th className="text-left py-2 px-2 font-bold text-zinc-500">K</th>
+                            <th className="text-left py-2 px-2 font-bold text-zinc-500">LLM</th>
+                            <th className="text-left py-2 px-2 font-bold text-zinc-500">Faith</th>
+                            <th className="text-left py-2 px-2 font-bold text-zinc-500">Rel</th>
+                            <th className="text-left py-2 px-2 font-bold text-zinc-500">Latency</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {arReport.rankings.map((r, idx) => (
+                            <tr
+                              key={idx}
+                              className={cn(
+                                "border-b transition-colors",
+                                darkMode ? "border-zinc-800 hover:bg-zinc-800/50" : "border-zinc-100 hover:bg-zinc-50",
+                                idx === 0 && (darkMode ? "bg-amber-900/20" : "bg-amber-50")
+                              )}
+                            >
+                              <td className="py-2 px-2 font-bold">{idx + 1}</td>
+                              <td className="py-2 px-2 font-mono font-bold text-amber-500">{r.compositeScore.toFixed(2)}</td>
+                              <td className="py-2 px-2 truncate max-w-[120px]">{r.config.embeddingModel}</td>
+                              <td className="py-2 px-2 capitalize">{r.config.chunkingStrategy}</td>
+                              <td className="py-2 px-2">{r.config.chunkSize}</td>
+                              <td className="py-2 px-2">{r.config.overlap}</td>
+                              <td className="py-2 px-2">{r.config.kValue}</td>
+                              <td className="py-2 px-2 truncate max-w-[120px]">{r.config.llmModel}</td>
+                              <td className="py-2 px-2">{r.scores.faithfulness.toFixed(1)}</td>
+                              <td className="py-2 px-2">{r.scores.relevance.toFixed(1)}</td>
+                              <td className="py-2 px-2">{(r.scores.latencyMs / 1000).toFixed(1)}s</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Empty state */}
+              {!arReport && !arRunning && (
+                <div className="flex flex-col items-center justify-center text-zinc-400 space-y-4 py-16">
+                  <div className={cn(
+                    "w-16 h-16 rounded-2xl flex items-center justify-center",
+                    darkMode ? "bg-zinc-900" : "bg-zinc-100"
+                  )}>
+                    <FlaskConical className="w-8 h-8" />
+                  </div>
+                  <p className="text-sm text-center">Upload a document, add test questions, configure the search space, then start AutoResearch.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
