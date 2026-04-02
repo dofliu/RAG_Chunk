@@ -9,7 +9,7 @@ import { get, set, clear, keys, del } from 'idb-keyval';
 import jsPDF from 'jspdf';
 import html2canvas from 'html2canvas';
 import { getAllProviders, getAllModels, embedWithModel, loadApiKeys, saveApiKeys } from './lib/providers/registry';
-import { runAutoResearch } from './lib/autoResearch/engine';
+import { runAutoResearch, estimateCombinations } from './lib/autoResearch/engine';
 import type { AutoResearchProgress, AutoResearchReport, TestQuestion, SearchSpace } from './lib/autoResearch/types';
 
 const AVAILABLE_LLM_MODELS = [
@@ -78,6 +78,7 @@ export default function App() {
   const [arReport, setArReport] = useState<AutoResearchReport | null>(null);
   const [arRunning, setArRunning] = useState(false);
   const arAbortRef = useRef<AbortController | null>(null);
+  const [arExpandedRow, setArExpandedRow] = useState<number | null>(null);
 
   useEffect(() => {
     refreshCachedFiles();
@@ -1350,8 +1351,8 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Max experiments */}
-                <div className="flex items-center gap-3">
+                {/* Max experiments + estimate */}
+                <div className="flex items-center gap-3 flex-wrap">
                   <label className="text-[10px] text-zinc-500 uppercase font-bold whitespace-nowrap">Max Experiments</label>
                   <input
                     type="number"
@@ -1364,6 +1365,13 @@ export default function App() {
                       darkMode ? "bg-zinc-800 border-zinc-700 text-zinc-100" : "bg-zinc-50 border-zinc-200 text-zinc-900"
                     )}
                   />
+                  <span className={cn("text-xs font-medium", darkMode ? "text-zinc-400" : "text-zinc-500")}>
+                    {(() => {
+                      const total = estimateCombinations(arSearchSpace);
+                      const actual = Math.min(total, arMaxExperiments);
+                      return `${total} total combinations, will run ${actual}`;
+                    })()}
+                  </span>
                 </div>
               </div>
 
@@ -1488,13 +1496,19 @@ export default function App() {
                           {arReport.rankings.map((r, idx) => (
                             <tr
                               key={idx}
+                              onClick={() => setArExpandedRow(arExpandedRow === idx ? null : idx)}
                               className={cn(
-                                "border-b transition-colors",
+                                "border-b transition-colors cursor-pointer",
                                 darkMode ? "border-zinc-800 hover:bg-zinc-800/50" : "border-zinc-100 hover:bg-zinc-50",
                                 idx === 0 && (darkMode ? "bg-amber-900/20" : "bg-amber-50")
                               )}
                             >
-                              <td className="py-2 px-2 font-bold">{idx + 1}</td>
+                              <td className="py-2 px-2 font-bold">
+                                <span className="flex items-center gap-1">
+                                  {arExpandedRow === idx ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                                  {idx + 1}
+                                </span>
+                              </td>
                               <td className="py-2 px-2 font-mono font-bold text-amber-500">{r.compositeScore.toFixed(2)}</td>
                               <td className="py-2 px-2 truncate max-w-[120px]">{r.config.embeddingModel}</td>
                               <td className="py-2 px-2 capitalize">{r.config.chunkingStrategy}</td>
@@ -1506,7 +1520,25 @@ export default function App() {
                               <td className="py-2 px-2">{r.scores.relevance.toFixed(1)}</td>
                               <td className="py-2 px-2">{(r.scores.latencyMs / 1000).toFixed(1)}s</td>
                             </tr>
-                          ))}
+                          )).flatMap((row, idx) => {
+                            const r = arReport.rankings[idx];
+                            if (arExpandedRow !== idx) return [row];
+                            return [row, (
+                              <tr key={`${idx}-answer`} className={cn(darkMode ? "bg-zinc-800/30" : "bg-zinc-50")}>
+                                <td colSpan={11} className="px-4 py-3">
+                                  <div className="space-y-2">
+                                    <p className="text-[10px] text-zinc-500 uppercase font-bold">Answer Preview</p>
+                                    <div className={cn(
+                                      "p-4 rounded-lg border text-sm leading-relaxed max-h-60 overflow-y-auto",
+                                      darkMode ? "bg-zinc-900 border-zinc-700 text-zinc-300" : "bg-white border-zinc-200 text-zinc-700"
+                                    )}>
+                                      <Markdown>{r.answer || 'No answer generated.'}</Markdown>
+                                    </div>
+                                  </div>
+                                </td>
+                              </tr>
+                            )];
+                          })}
                         </tbody>
                       </table>
                     </div>

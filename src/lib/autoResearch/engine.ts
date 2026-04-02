@@ -16,8 +16,10 @@ function generateConfigs(space: SearchSpace): ExperimentConfig[] {
   const configs: ExperimentConfig[] = [];
   for (const embeddingModel of space.embeddingModels) {
     for (const chunkingStrategy of space.chunkingStrategies) {
-      const sizes = chunkingStrategy === 'paragraph' ? [0] : space.chunkSizes;
-      const overlaps = chunkingStrategy !== 'fixed' ? [0] : space.overlaps;
+      // All strategies now use chunk sizes — paragraph uses it as max paragraph length
+      const sizes = space.chunkSizes;
+      // Overlap only matters for fixed and paragraph (when splitting long paragraphs)
+      const overlaps = space.overlaps;
       for (const chunkSize of sizes) {
         for (const overlap of overlaps) {
           for (const kValue of space.kValues) {
@@ -41,7 +43,20 @@ async function chunkByStrategy(
   apiKeys: Record<string, string>,
 ): Promise<string[]> {
   if (strategy === 'paragraph') {
-    return text.split(/\n\s*\n/).filter(p => p.trim().length > 0);
+    const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim().length > 0);
+    // Use chunkSize as max paragraph length — split long paragraphs
+    if (chunkSize > 0) {
+      const result: string[] = [];
+      for (const p of paragraphs) {
+        if (p.length > chunkSize) {
+          result.push(...chunkText(p, chunkSize, overlap));
+        } else {
+          result.push(p);
+        }
+      }
+      return result;
+    }
+    return paragraphs;
   }
   if (strategy === 'semantic') {
     const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
@@ -73,6 +88,11 @@ async function chunkByStrategy(
   }
   // Fixed size
   return chunkText(text, chunkSize, overlap);
+}
+
+/** Estimate total experiment count without generating configs */
+export function estimateCombinations(space: SearchSpace): number {
+  return generateConfigs(space).length;
 }
 
 export interface RunAutoResearchOptions {
