@@ -382,7 +382,20 @@ export default function App() {
         scale: 2,
         useCORS: true,
         logging: false,
-        backgroundColor: '#f9fafb'
+        backgroundColor: darkMode ? '#09090b' : '#f9fafb',
+        onclone: (clonedDoc) => {
+          // Remove all style tags that might contain oklch
+          const styleTags = clonedDoc.getElementsByTagName('style');
+          for (let i = 0; i < styleTags.length; i++) {
+            if (styleTags[i].innerHTML.includes('oklch')) {
+              // We can't just remove it as it might contain layout styles
+              // But we can try to replace oklch with something safe or just let it be
+              // Actually, html2canvas fails on the parser.
+              // Let's try to replace oklch(...) with rgb(0,0,0) in the clone's CSS
+              styleTags[i].innerHTML = styleTags[i].innerHTML.replace(/oklch\([^)]+\)/g, '#000000');
+            }
+          }
+        }
       });
       
       const imgData = canvas.toDataURL('image/png');
@@ -732,7 +745,7 @@ export default function App() {
                 onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
                 placeholder="Ask a question about your document..."
                 className={cn(
-                  "w-full pl-12 pr-24 py-4 border rounded-2xl text-base focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 shadow-sm transition-colors",
+                  "w-full pl-12 pr-24 py-4 border rounded-2xl text-base focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-sm transition-colors",
                   darkMode ? "bg-zinc-800 border-zinc-700 text-zinc-100" : "bg-zinc-50 border-zinc-200 text-zinc-900"
                 )}
               />
@@ -904,7 +917,7 @@ export default function App() {
                               key={i} 
                               className={cn(
                                 "p-3 rounded-xl border shadow-sm transition-all text-xs",
-                                isInAnyK ? (darkMode ? "bg-indigo-500/10 border-indigo-500/30 ring-1 ring-indigo-500/20" : "bg-white border-indigo-200 ring-1 ring-indigo-500/5") : (darkMode ? "bg-zinc-900 border-zinc-800 opacity-40" : "bg-white border-zinc-200 opacity-40"),
+                                isInAnyK ? (darkMode ? "bg-indigo-900 border-indigo-700 ring-1 ring-indigo-800" : "bg-indigo-50 border-indigo-200 ring-1 ring-indigo-100") : (darkMode ? "bg-zinc-900 border-zinc-800 opacity-40" : "bg-white border-zinc-200 opacity-40"),
                                 !isAboveThreshold && "grayscale"
                               )}
                             >
